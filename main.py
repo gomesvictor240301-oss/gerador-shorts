@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 import requests                     # chama a API de transcrição (Groq)
 import yt_dlp                       # baixa vídeos do YouTube
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -40,6 +40,8 @@ GROQ_MODEL = "whisper-large-v3-turbo"                # modelo Whisper na nuvem
 CLIP_SECONDS = int(os.getenv("CLIP_SECONDS", "60"))  # duração do corte
 COOKIES_FILE = os.getenv("YT_COOKIES")               # opcional (veja README)
 FILE_TTL = 60 * 60                                   # apaga vídeos após 1h
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "200"))  # limite de upload
+ALLOWED_EXT = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
 
 app = FastAPI(title="Gerador de Shorts")
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
@@ -188,7 +190,8 @@ def render_short(video: Path, ass_file: Path, output: Path):
       scale      : redimensiona para 1080x1920 (full HD vertical)
       ass=...    : "queima" as legendas na imagem
     """
-    vf = ("crop=trunc(ih*9/16/2)*2:ih,"      # largura = altura*9/16 (par)
+    # min(...) evita erro se o vídeo já for vertical ou mais estreito que 9:16
+    vf = ("crop='min(iw,trunc(ih*9/16/2)*2)':'min(ih,trunc(iw*16/9/2)*2)',"
           "scale=1080:1920,setsar=1,"
           f"ass={ass_file.name}")             # roda dentro da pasta do job
     subprocess.run(
@@ -209,14 +212,18 @@ def cleanup_old_files():
 
 
 # ------------------------------ O JOB COMPLETO --------------------------
-def process_job(job_id: str, url: str):
+def process_job(job_id: str, url: str | None = None, local_video: Path | None = None):
     folder = WORK_DIR / job_id
     folder.mkdir(exist_ok=True)
     try:
         set_step(job_id, "Na fila...")
         with _render_lock:                      # 1 vídeo por vez
-            set_step(job_id, "Baixando vídeo...")
-            video = download_video(url, folder)
+            if local_video:                      # veio por upload
+                set_step(job_id, "Preparando vídeo...")
+                video = local_video
+            else:                                # veio por link do YouTube
+                set_step(job_id, "Baixando vídeo...")
+                video = download_video(url, folder)
 
             set_step(job_id, "Transcrevendo áudio...")
             audio = extract_audio(video, folder)
@@ -247,6 +254,34 @@ def generate_short(req: GenerateRequest, background: BackgroundTasks):
     job_id = uuid.uuid4().hex[:12]
     JOBS[job_id] = {"status": "processing", "step": "Iniciando..."}
     background.add_task(process_job, job_id, url)   # roda em segundo plano
+    return {"job_id": job_id}
+
+
+@app.post("/upload-short")
+async def upload_short(background: BackgroundTasks, file: UploadFile = File(...)):
+    """Recebe o vídeo enviado pelo usuário (multipart) e inicia o job."""
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_EXT:
+        raise HTTPException(400, "Formato não suportado. Envie MP4, MOV, MKV ou WEBM.")
+
+    job_id = uuid.uuid4().hex[:12]
+    folder = WORK_DIR / job_id
+    folder.mkdir(exist_ok=True)
+    dest = folder / f"input{ext}"
+
+    # Grava em pedaços de 1 MB (não estoura a memória do servidor grátis)
+    size, limit = 0, MAX_UPLOAD_MB * 1024 * 1024
+    with open(dest, "wb") as out:
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            if size > limit:
+                out.close()
+                shutil.rmtree(folder, ignore_errors=True)
+                raise HTTPException(413, f"Arquivo maior que {MAX_UPLOAD_MB} MB.")
+            out.write(chunk)
+
+    JOBS[job_id] = {"status": "processing", "step": "Iniciando..."}
+    background.add_task(process_job, job_id, None, dest)
     return {"job_id": job_id}
 
 

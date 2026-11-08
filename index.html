@@ -2,7 +2,6 @@
 <html lang="pt-BR" class="dark">
 <head>
   <meta charset="UTF-8" />
-  <!-- viewport: faz o site se ajustar à tela do celular -->
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Gerador de Shorts</title>
   <script src="https://cdn.tailwindcss.com"></script>
@@ -10,91 +9,119 @@
 <body class="bg-zinc-950 text-zinc-100 min-h-screen">
   <main class="max-w-md mx-auto px-4 py-8">
     <h1 class="text-3xl font-extrabold text-center">✂️ Gerador de <span class="text-yellow-400">Shorts</span></h1>
-    <p class="text-center text-zinc-400 mt-2 text-sm">Cole um link do YouTube e receba um corte vertical com legendas.</p>
+    <p class="text-center text-zinc-400 mt-2 text-sm">Envie um vídeo e receba um corte vertical com legendas.</p>
 
-    <!-- Campo + botão -->
     <div class="mt-8 space-y-3">
-      <input id="url" type="url" inputmode="url" placeholder="https://youtube.com/watch?v=..."
-        class="w-full rounded-xl bg-zinc-900 border-2 border-zinc-700 focus:border-yellow-400 outline-none px-4 py-4 text-base" />
+      <!-- Upload do vídeo (opção principal) -->
+      <label for="file" class="block cursor-pointer rounded-xl border-2 border-dashed border-zinc-700 hover:border-yellow-400 p-6 text-center">
+        <span class="text-3xl">📁</span>
+        <span id="fileName" class="block mt-2 font-semibold">Toque para escolher um vídeo</span>
+        <span class="block text-xs text-zinc-500 mt-1">MP4, MOV, MKV ou WEBM · até 200 MB</span>
+      </label>
+      <input id="file" type="file" accept="video/*" class="hidden" />
+
+      <!-- Link do YouTube (opção extra, pode ser bloqueada pelo YouTube) -->
+      <details class="text-sm text-zinc-400">
+        <summary class="cursor-pointer">Ou usar link do YouTube (pode falhar)</summary>
+        <input id="url" type="url" inputmode="url" placeholder="https://youtube.com/watch?v=..."
+          class="mt-2 w-full rounded-xl bg-zinc-900 border-2 border-zinc-700 focus:border-yellow-400 outline-none px-4 py-3 text-base text-zinc-100" />
+      </details>
+
       <button id="btn"
         class="w-full rounded-xl bg-yellow-400 text-black font-bold text-lg py-4 active:scale-95 transition disabled:opacity-50">
         Gerar Vídeo Curto
       </button>
     </div>
 
-    <!-- Loading -->
     <div id="loading" class="hidden mt-8 text-center">
       <div class="mx-auto h-12 w-12 rounded-full border-4 border-zinc-700 border-t-yellow-400 animate-spin"></div>
       <p id="step" class="mt-4 font-semibold text-yellow-300">Iniciando...</p>
       <p class="text-xs text-zinc-500 mt-1">Pode levar 1 a 3 minutos. Não feche a página.</p>
     </div>
 
-    <!-- Erro -->
     <p id="error" class="hidden mt-6 rounded-xl bg-red-950 border border-red-800 text-red-300 p-4 text-sm"></p>
 
-    <!-- Resultado -->
     <div id="result" class="hidden mt-8">
-      <video id="player" controls playsinline
-        class="w-full aspect-[9/16] rounded-2xl bg-black border border-zinc-800"></video>
+      <video id="player" controls playsinline class="w-full aspect-[9/16] rounded-2xl bg-black border border-zinc-800"></video>
       <a id="download" download="short.mp4"
-        class="block text-center mt-4 rounded-xl bg-green-500 text-black font-bold text-lg py-4 active:scale-95 transition">
-        ⬇️ Baixar MP4
-      </a>
+        class="block text-center mt-4 rounded-xl bg-green-500 text-black font-bold text-lg py-4 active:scale-95 transition">⬇️ Baixar MP4</a>
     </div>
   </main>
 
   <script>
-    // Pega os elementos da tela pelo id
     const $ = (id) => document.getElementById(id);
-    const API = ""; // vazio = mesmo domínio do site. Se o backend for outro, coloque a URL aqui.
+    const API = ""; // mesmo domínio do site
+    const show = (el, on) => el.classList.toggle("hidden", !on);
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    function setError(msg) { $("error").textContent = msg; show($("error"), !!msg); }
 
-    function show(el, on) { el.classList.toggle("hidden", !on); }
+    // Mostra o nome do arquivo escolhido
+    $("file").addEventListener("change", () => {
+      const f = $("file").files[0];
+      $("fileName").textContent = f ? `✅ ${f.name}` : "Toque para escolher um vídeo";
+    });
 
-    function setError(msg) {
-      $("error").textContent = msg;
-      show($("error"), !!msg);
+    // Envia o vídeo com barra de progresso (XMLHttpRequest permite medir o envio)
+    function uploadVideo(file) {
+      return new Promise((resolve, reject) => {
+        const form = new FormData();
+        form.append("file", file);
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", `${API}/upload-short`);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) $("step").textContent = `Enviando vídeo... ${Math.round((e.loaded / e.total) * 100)}%`;
+        };
+        xhr.onload = () => {
+          let data = {};
+          try { data = JSON.parse(xhr.responseText); } catch {}
+          xhr.status === 200 ? resolve(data.job_id) : reject(new Error(data.detail || "Falha no envio do vídeo."));
+        };
+        xhr.onerror = () => reject(new Error("Erro de conexão no envio."));
+        xhr.send(form);
+      });
     }
 
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    async function sendLink(url) {
+      const res = await fetch(`${API}/generate-short`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Não consegui iniciar o processo.");
+      }
+      return (await res.json()).job_id;
+    }
+
+    // Pergunta o andamento a cada 2s até terminar
+    async function waitForJob(jobId) {
+      while (true) {
+        await sleep(2000);
+        const s = await (await fetch(`${API}/status/${jobId}`)).json();
+        $("step").textContent = s.step;
+        if (s.status === "error") throw new Error(s.error || "Erro ao gerar o vídeo.");
+        if (s.status === "done") return API + s.url;
+      }
+    }
 
     $("btn").addEventListener("click", async () => {
+      const file = $("file").files[0];
       const url = $("url").value.trim();
-      if (!url) return setError("Cole um link do YouTube primeiro.");
+      if (!file && !url) return setError("Escolha um vídeo (ou cole um link) primeiro.");
 
-      // Reseta a tela e entra no estado "carregando"
       setError("");
       show($("result"), false);
       show($("loading"), true);
+      $("step").textContent = "Iniciando...";
       $("btn").disabled = true;
 
       try {
-        // 1) Pede ao backend para iniciar o trabalho
-        const res = await fetch(`${API}/generate-short`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url }),
-        });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.detail || "Não consegui iniciar o processo.");
-        }
-        const { job_id } = await res.json();
-
-        // 2) Pergunta o andamento a cada 2s até terminar (polling)
-        while (true) {
-          await sleep(2000);
-          const s = await (await fetch(`${API}/status/${job_id}`)).json();
-          $("step").textContent = s.step; // mostra "Baixando...", "Transcrevendo..."
-
-          if (s.status === "error") throw new Error(s.error || "Erro ao gerar o vídeo.");
-          if (s.status === "done") {
-            const videoUrl = API + s.url;
-            $("player").src = videoUrl;
-            $("download").href = videoUrl;
-            show($("result"), true);
-            break;
-          }
-        }
+        const jobId = file ? await uploadVideo(file) : await sendLink(url);
+        const videoUrl = await waitForJob(jobId);
+        $("player").src = videoUrl;
+        $("download").href = videoUrl;
+        show($("result"), true);
       } catch (e) {
         setError(e.message);
       } finally {
